@@ -1,14 +1,9 @@
-
-# test_archive_logs.ps1
 $ScriptPath = "$PSScriptRoot\archive_logs.ps1"
 
 function Assert-True {
     param($Condition, $Message)
     if (-not $Condition) {
-        Write-Host "FAIL: $Message"
-        exit 1
-    } else {
-        Write-Host "PASS: $Message"
+        throw "Assertion failed: $Message"
     }
 }
 
@@ -26,44 +21,152 @@ function Cleanup-TestEnv($Path) {
     }
 }
 
-# ---------- TESTS ----------
-Write-Host "Running tests..."
-$TestRoot, $LogPath, $BackupPath = Create-TestEnv
-
-# Test 1: Non-existent directory
-Write-Host "Test 1: Non-existent log directory"
-$Error.Clear()
-& $ScriptPath -LogPath "$TestRoot\notexist" -ThresholdMb 10 -FilesToArchive 2 2>$null
-Assert-True ($LASTEXITCODE -ne 0) "Non-existent directory should cause error"
-
-# Test 2: Folder under threshold
-Write-Host "Test 2: Folder under threshold"
-1..3 | ForEach-Object {
-    Set-Content "$LogPath\log$_.txt" ("data" * 100)  # маленькие файлы
+function Test-NonExistentDirectory {
+    Write-Host "TEST: Non-existent log directory"
+    $TestRoot, $LogPath, $BackupPath = Create-TestEnv
+    try {
+        & $ScriptPath -LogPath "$TestRoot\notexist" -ThresholdValue 10 -ThresholdType MB -FilesToArchive 2 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            throw "Expected error for non-existent directory, but script succeeded."
+        }
+    } finally {
+        Cleanup-TestEnv $TestRoot
+    }
 }
-& $ScriptPath -LogPath $LogPath -ThresholdMb 50 -FilesToArchive 2
-if (Test-Path $BackupPath) {
-    $Archives = Get-ChildItem -Path $BackupPath -Filter *.tar.gz -ErrorAction SilentlyContinue
+
+function Test-UnderThresholdMB {
+    Write-Host "TEST: Folder under threshold (MB)"
+    $TestRoot, $LogPath, $BackupPath = Create-TestEnv
+    try {
+        1..3 | ForEach-Object {
+            Set-Content "$LogPath\log$_.txt" ("data" * 100)
+        }
+        & $ScriptPath -LogPath $LogPath -ThresholdValue 50 -ThresholdType MB -FilesToArchive 2
+        $Archives = if (Test-Path $BackupPath) { Get-ChildItem -Path $BackupPath -Filter *.tar.gz -ErrorAction SilentlyContinue } else { @() }
+        Assert-True ($Archives.Count -eq 0) "No archive should be created under threshold (MB)"
+    } finally {
+        Cleanup-TestEnv $TestRoot
+    }
+}
+
+function Test-ExceedThresholdMB {
+    Write-Host "TEST: Threshold exceeded (MB)"
+    $TestRoot, $LogPath, $BackupPath = Create-TestEnv
+    try {
+        1..5 | ForEach-Object {
+            $f = "$LogPath\old$_.txt"
+            Set-Content $f ("x" * 1024 * 1024 * 2)
+            (Get-Item $f).LastWriteTime = (Get-Date).AddDays(-$_)
+        }
+        & $ScriptPath -LogPath $LogPath -ThresholdValue 5 -ThresholdType MB -FilesToArchive 3
+        $Archives = if (Test-Path $BackupPath) { Get-ChildItem -Path $BackupPath -Filter *.tar.gz -ErrorAction SilentlyContinue } else { @() }
+        Assert-True ($Archives.Count -eq 1) "Archive should be created (MB)"
+        Assert-True ($Archives[0].Length -gt 0) "Archive should not be empty (MB)"
+    } finally {
+        Cleanup-TestEnv $TestRoot
+    }
+}
+
+function Test-PercentMode {
+    Write-Host "TEST: Threshold in Percent mode"
+    $TestRoot, $LogPath, $BackupPath = Create-TestEnv
+    try {
+        1..3 | ForEach-Object {
+            Set-Content "$LogPath\pct$_.txt" ("small" * 1000)
+        }
+        & $ScriptPath -LogPath $LogPath -ThresholdValue 1 -ThresholdType Percent -FilesToArchive 2
+    } finally {
+        Cleanup-TestEnv $TestRoot
+    }
+}
+
+function Run-Suite1 {
+    Write-Host "`nSuite 1. Running tests: 1"
+    Test-NonExistentDirectory
+}
+
+function Run-Suite2 {
+    Write-Host "`nSuite 2. Running tests: 1, 2"
+    Test-NonExistentDirectory
+    Test-UnderThresholdMB
+}
+
+function Run-Suite3 {
+    Write-Host "`nSuite 3. Running tests: 1, 2, 3"
+    Test-NonExistentDirectory
+    Test-UnderThresholdMB
+    Test-ExceedThresholdMB
+}
+
+function Run-Suite4 {
+    Write-Host "`nSuite 4. Running tests: 1, 2, 4"
+    Test-NonExistentDirectory
+    Test-UnderThresholdMB
+    Test-PercentMode
+}
+
+$suites = @(
+    @{ Name = "Suite 1"; Func = ${function:Run-Suite1}; Tests = 1 },
+    @{ Name = "Suite 2"; Func = ${function:Run-Suite2}; Tests = 2 },
+    @{ Name = "Suite 3"; Func = ${function:Run-Suite3}; Tests = 3 },
+    @{ Name = "Suite 4"; Func = ${function:Run-Suite4}; Tests = 3 }
+)
+
+$totalSuites = $suites.Count
+$passedSuites = 0
+$failedSuites = 0
+$totalTestsRun = 0
+$totalTestsPassed = 0
+$totalTestsFailed = 0
+
+Write-Host "Starting test execution:"
+
+foreach ($suite in $suites) {
+    $suiteName = $suite.Name
+    $suiteFunc = $suite.Func
+    $expectedTests = $suite.Tests
+
+    Write-Host "`nExecuting $suiteName ($expectedTests tests)"
+$suitePassed = $true
+    $testsInSuitePassed = 0
+    $testsInSuiteFailed = 0
+
+    try {
+        & $suiteFunc
+        $testsInSuitePassed = $expectedTests
+    } catch {
+        $suitePassed = $false
+        $testsInSuiteFailed = 1
+        Write-Host "$suiteName FAILED: $_" -ForegroundColor Red
+    }
+
+    if ($suitePassed) {
+        $passedSuites++
+        $totalTestsPassed += $expectedTests
+        Write-Host "$suiteName PASSED" -ForegroundColor Green
+    } else {
+        $failedSuites++
+        $totalTestsFailed += $testsInSuiteFailed
+        
+    }
+    $totalTestsRun += $expectedTests
+}
+Write-Host ""
+Write-Host "Final statistics" -ForegroundColor Blue
+Write-Host ""
+Write-Host "Total suites executed: $totalSuites"
+Write-Host "Suites passed:         $passedSuites"
+Write-Host "Suites failed:         $failedSuites"
+Write-Host ""
+Write-Host "Total tests executed:  $totalTestsRun"
+Write-Host "Tests passed:          $totalTestsPassed"
+Write-Host "Tests failed:          $totalTestsFailed"
+Write-Host ""
+
+if ($failedSuites -gt 0) {
+    Write-Host "Some suites failed." -ForegroundColor Yellow
+    exit 1
 } else {
-    $Archives = @()
+    Write-Host "All suites passed!!!" -ForegroundColor Green
+    exit 0
 }
-Assert-True ($Archives.Count -eq 0) "No archive should be created under threshold"
-
-# Test 3: Threshold exceeded, archive M files
-Write-Host "Test 3: Threshold exceeded"
-1..5 | ForEach-Object {
-    $f = "$LogPath\old$_.txt"
-    Set-Content $f ("x" * 1024 * 1024 * 2) # ~2 MB файл
-    (Get-Item $f).LastWriteTime = (Get-Date).AddDays(-$_) # старые даты
-}
-& $ScriptPath -LogPath $LogPath -ThresholdMb 1 -FilesToArchive 3
-if (Test-Path $BackupPath) {
-    $Archives = Get-ChildItem -Path $BackupPath -Filter *.tar.gz -ErrorAction SilentlyContinue
-} else {
-    $Archives = @()
-}
-Assert-True ($Archives.Count -eq 1) "Archive should be created"
-Assert-True ($Archives[0].Length -gt 0) "Archive should not be empty"
-
-Cleanup-TestEnv $TestRoot
-Write-Host "All tests passed!"

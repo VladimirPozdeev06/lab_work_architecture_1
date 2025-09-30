@@ -4,7 +4,11 @@ param(
     [string]$LogPath,
 
     [Parameter(Mandatory = $true)]
-    [int]$ThresholdMb,
+    [double]$ThresholdValue,
+
+    [Parameter(Mandatory = $true)]
+    [ValidateSet("MB", "Percent")]
+    [string]$ThresholdType,
 
     [Parameter(Mandatory = $true)]
     [int]$FilesToArchive
@@ -16,25 +20,48 @@ if (-not (Test-Path -Path $LogPath)) {
 }
 
 $FileItems = Get-ChildItem -Path $LogPath -Recurse -File -ErrorAction SilentlyContinue
-$UsedSize = ($FileItems | Measure-Object Length -Sum).Sum
-if (-not $UsedSize) { $UsedSize = 0 }
+$UsedSize = ($FileItems | Measure-Object -Property Length -Sum).Sum
+if ($null -eq $UsedSize) { $UsedSize = 0 }
+$UsedSizeMb = $UsedSize / 1MB
 
-$PercentUsed = [math]::Round(($UsedSize / 1MB) / $ThresholdMb * 100, 2)
+$Drive = (Get-Item $LogPath).PSDrive.Name
+$DiskInfo = Get-PSDrive -Name $Drive -ErrorAction Stop
+$TotalDiskSizeMb = $DiskInfo.Free + $DiskInfo.Used
+$TotalDiskSizeMb = [Math]::Round($TotalDiskSizeMb / 1MB, 2)
 
-Write-Host "Log folder size: $([math]::Round($UsedSize/1MB,2)) MB (${PercentUsed}% of threshold $ThresholdMb MB)."
+switch ($ThresholdType) {
+    "MB" {
+        if ($ThresholdValue -le 0) {
+            Write-Error "ThresholdValue must be greater than 0 when using 'MB'."
+            exit 1
+        }
+        $ThresholdInMb = $ThresholdValue
+        $PercentUsed = [math]::Round(($UsedSizeMb / $ThresholdInMb) * 100, 2)
+        Write-Host "Log folder size: $([math]::Round($UsedSizeMb, 2)) MB (${PercentUsed}% of threshold ${ThresholdInMb} MB)."
+    }
+    "Percent" {
+        if ($ThresholdValue -le 0 -or $ThresholdValue -gt 100) {
+            Write-Error "ThresholdValue must be between 0 and 100 when using 'Percent'."
+            exit 1
+        }
+        $ThresholdInMb = ($ThresholdValue / 100) * $TotalDiskSizeMb
+        $PercentUsed = [math]::Round(($UsedSizeMb / $TotalDiskSizeMb) * 100, 2)
+        Write-Host "Log folder size: $([math]::Round($UsedSizeMb, 2)) MB (${PercentUsed}% of total disk ${TotalDiskSizeMb} MB). Threshold: ${ThresholdValue}% (${ThresholdInMb:N2} MB)."
+    }
+}
 
-if ($PercentUsed -gt 100) {
+if ($UsedSizeMb -gt $ThresholdInMb) {
     $ParentDir = Split-Path -Parent $LogPath
     $BackupPath = Join-Path $ParentDir "backup"
     if (-not (Test-Path -Path $BackupPath)) {
         New-Item -ItemType Directory -Path $BackupPath | Out-Null
     }
 
-    Write-Host "Threshold exceeded. Archiving $FilesToArchive oldest files..."
+    Write-Host "Threshold exceeded. Archiving $FilesToArchive oldest files."
 
     $OldFiles = $FileItems | Sort-Object LastWriteTime | Select-Object -First $FilesToArchive
 
-    if ($OldFiles.Count -eq 0) {
+    if (-not $OldFiles -or $OldFiles.Count -eq 0) {
         Write-Host "No files to archive."
         exit 0
     }
@@ -54,7 +81,7 @@ if ($PercentUsed -gt 100) {
     & tar -czf $ArchivePath -C $LogPath $RelativePaths
 
     if ($LASTEXITCODE -ne 0) {
-        Write-Error "Failed to create archive. Files were NOT deleted."
+        Write-Error "Failed to create archive. Files were not deleted."
         exit 1
     }
 
