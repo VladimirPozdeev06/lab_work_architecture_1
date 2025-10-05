@@ -23,6 +23,7 @@ run_test
 run_test "test_data"
 run_test "i_dont_know" "50" "50"
 run_test "50" "50" "50"
+run_test "test_data" "2500" "50" "lishny"
 run_test  "test_data" "ff" "50"
 run_test "test_data" "50" "ff"
 run_test "test_data" "50.5" "120"
