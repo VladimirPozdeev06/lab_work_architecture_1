@@ -13,7 +13,7 @@ rm -rf "$backup_dir"
 fi
 }
 trap cleanup EXIT
-if [ $# -lt 3 ]; then
+if ! [ $# -eq 3 ]; then
     echo "The total amount of arguments is less than 3 so the test is wrong. The program will be ended with error code 1"
     exit 1
 fi
