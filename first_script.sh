@@ -112,7 +112,7 @@ fi
 if [ "$new_size" -lt "$user_size" ]; then
     echo "The current size of folder already has been less than inputted percentage :))"
     echo "The success"
-    exit 1
+    exit 
 fi
 echo "The second archivation....."
 
